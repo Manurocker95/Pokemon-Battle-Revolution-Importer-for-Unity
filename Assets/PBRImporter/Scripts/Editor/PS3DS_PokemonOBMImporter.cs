@@ -359,7 +359,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             smr.localBounds = bounds;
             smr.updateWhenOffscreen = true;
 
-            smr.sharedMaterials = CreateMaterials(src, tgaFolderPath, meshFolder);
+            smr.sharedMaterials = CreateMaterials(src, tgaFolderPath, meshFolder, baseName);
         }
 
         private Mesh BuildUnityMesh(PS3DS_OBMMesh src, int boneCount)
@@ -472,7 +472,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             return 0;
         }
 
-        private Material[] CreateMaterials(PS3DS_OBMMesh src, string tgaFolderPath, string meshFolder)
+        private Material[] CreateMaterials(PS3DS_OBMMesh src, string tgaFolderPath, string meshFolder, string baseName)
         {
             int count = Mathf.Max(1, src.MaterialGroups.Count);
             Material[] mats = new Material[count];
@@ -481,27 +481,57 @@ namespace VirtualPhenix.PokemonSnap3DS
             {
                 PS3DS_OBMMaterialGroup group = i < src.MaterialGroups.Count ? src.MaterialGroups[i] : null;
 
-                Material mat = new Material(Shader.Find("Diffuse"));
-                mat.name = group != null ? group.Name : "Material";
+                string groupName = group != null ? group.Name : "Material";
+                if (string.IsNullOrEmpty(groupName))
+                    groupName = "Material";
+
+                Texture2D tex = null;
+
+                if (group != null && group.TextureNames != null && group.TextureNames.Count > 0)
+                    tex = LoadOrConvertTexture(group.TextureNames[0], tgaFolderPath, meshFolder);
+
+                Material mat = new Material(Shader.Find("Standard"));
+                mat.name = groupName;
 
                 if (group != null)
-                {
                     mat.color = group.Color;
 
-                    if (group.TextureNames != null && group.TextureNames.Count > 0)
-                    {
-                        Texture2D tex = LoadOrConvertTexture(group.TextureNames[0], tgaFolderPath, meshFolder);
-                        if (tex != null)
-                            mat.mainTexture = tex;
-                    }
-                }
+                if (tex != null)
+                    mat.mainTexture = tex;
 
-                string matPath = meshFolder + "/" + mat.name + "_" + i + ".mat";
-                AssetDatabase.CreateAsset(mat, AssetDatabase.GenerateUniqueAssetPath(matPath));
-                mats[i] = mat;
+                string safeMatName = baseName + "_" + src.Name + "_" + i + "_" + groupName;
+                string matPath = meshFolder + "/" + SanitizeFileName(safeMatName) + ".mat";
+                matPath = AssetDatabase.GenerateUniqueAssetPath(matPath);
+
+                AssetDatabase.CreateAsset(mat, matPath);
+
+                Material savedMat = AssetDatabase.LoadAssetAtPath(matPath, typeof(Material)) as Material;
+
+                if (savedMat != null)
+                    mats[i] = savedMat;
+                else
+                    mats[i] = mat;
             }
 
             return mats;
+        }
+
+        private static string SanitizeFileName(string name)
+        {
+            if (string.IsNullOrEmpty(name))
+                return "unnamed";
+
+            char[] invalid = Path.GetInvalidFileNameChars();
+
+            for (int i = 0; i < invalid.Length; i++)
+                name = name.Replace(invalid[i].ToString(), "_");
+
+            name = name.Replace(" ", "_");
+            name = name.Replace("/", "_");
+            name = name.Replace("\\", "_");
+            name = name.Replace(":", "_");
+
+            return name;
         }
 
         private Texture2D LoadOrConvertTexture(string texName, string tgaFolderPath, string outputFolder)
