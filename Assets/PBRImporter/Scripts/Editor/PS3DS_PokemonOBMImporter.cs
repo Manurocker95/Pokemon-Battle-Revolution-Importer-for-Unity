@@ -41,6 +41,7 @@ namespace VirtualPhenix.PokemonSnap3DS
         private bool m_importShinyMaterials = false;
         private string m_shinyTgaFolderPath = "";
         private string m_outputFolder = "Assets/PS3DS_OBM_Imported";
+        private float m_importScale = 1f;
 
         [MenuItem("PS3DS/Battle Revolution/Import Pokemon OBM")]
         public static void Open()
@@ -131,6 +132,7 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             GUILayout.Space(10);
             m_boundExpand = EditorGUILayout.FloatField("Bound Expand", m_boundExpand);
+            m_importScale = EditorGUILayout.FloatField("Import Scale", m_importScale);
 
             GUILayout.Space(10);
             GUILayout.Label("SDR / OUT Animation Import", EditorStyles.boldLabel);
@@ -264,6 +266,43 @@ namespace VirtualPhenix.PokemonSnap3DS
             return root;
         }
 
+
+        private class PS3DS_ImportAssetFolders
+        {
+            public string Root;
+            public string Meshes;
+            public string Materials;
+            public string Textures;
+            public string Animations;
+            public string Controllers;
+            public string Prefabs;
+            public string Debug;
+        }
+
+        private PS3DS_ImportAssetFolders CreateImportAssetFolders(string importFolder)
+        {
+            PS3DS_ImportAssetFolders folders = new PS3DS_ImportAssetFolders();
+            folders.Root = importFolder;
+            folders.Meshes = importFolder + "/Meshes";
+            folders.Materials = importFolder + "/Materials";
+            folders.Textures = importFolder + "/Textures";
+            folders.Animations = importFolder + "/Animations";
+            folders.Controllers = importFolder + "/Controller";
+            folders.Prefabs = importFolder + "/Prefab";
+            folders.Debug = importFolder + "/Debug";
+
+            EnsureFolder(folders.Root);
+            EnsureFolder(folders.Meshes);
+            EnsureFolder(folders.Materials);
+            EnsureFolder(folders.Textures);
+            EnsureFolder(folders.Animations);
+            EnsureFolder(folders.Controllers);
+            EnsureFolder(folders.Prefabs);
+            EnsureFolder(folders.Debug);
+
+            return folders;
+        }
+
         private GameObject ImportOBMInternal(string obmPath, string tgaFolderPath, PS3DS_SDRData sdr)
         {
             PS3DS_OBMData data = ParseOBM(obmPath);
@@ -285,24 +324,26 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             string originalBaseName = Path.GetFileNameWithoutExtension(obmPath);
             string importFolder = GetUniqueImportFolderPath(m_outputFolder, originalBaseName);
-            EnsureFolder(importFolder);
+            PS3DS_ImportAssetFolders folders = CreateImportAssetFolders(importFolder);
 
             string baseName = Path.GetFileName(importFolder);
             GameObject root = new GameObject(baseName);
+            root.transform.localScale = Vector3.one * m_importScale;
 
             List<Transform> bones = CreateBones(data, root.transform);
             Matrix4x4[] bindposes = CreateBindposes(bones);
 
             for (int i = 0; i < data.Meshes.Count; i++)
-                CreateMeshObject(data.Meshes[i], data, root.transform, bones, bindposes, tgaFolderPath, baseName, importFolder, i);
+                CreateMeshObject(data.Meshes[i], data, root.transform, bones, bindposes, tgaFolderPath, baseName, folders, i);
 
             if (sdr != null && sdr.Bones.Count > 0)
                 RebindSkinnedMeshesFromSDR(root, sdr);
 
             ApplyModelRootRotation(root);
+            CreatePrefabAsset(root, folders.Prefabs, baseName);
 
             Selection.activeGameObject = root;
-            Debug.Log("Imported OBM: " + obmPath);
+            Debug.Log("Imported OBM: " + obmPath + " | Folder: " + importFolder);
             return root;
         }
 
@@ -601,7 +642,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             Matrix4x4[] bindposes,
             string tgaFolderPath,
             string baseName,
-            string meshFolder,
+            PS3DS_ImportAssetFolders folders,
             int meshIndex)
         {
             GameObject go = new GameObject(src.Name);
@@ -610,12 +651,12 @@ namespace VirtualPhenix.PokemonSnap3DS
             go.transform.localRotation = Quaternion.identity;
             go.transform.localScale = Vector3.one;
 
-            EnsureFolder(meshFolder);
+            EnsureFolder(folders.Meshes);
 
-            Mesh mesh = BuildUnityMesh(src, bones, meshFolder, baseName, meshIndex);
+            Mesh mesh = BuildUnityMesh(src, bones, folders.Debug, baseName, meshIndex);
             mesh.bindposes = bindposes;
 
-            string meshPath = meshFolder + "/" + src.Name + "_" + meshIndex + ".asset";
+            string meshPath = folders.Meshes + "/" + src.Name + "_" + meshIndex + ".asset";
             AssetDatabase.CreateAsset(mesh, AssetDatabase.GenerateUniqueAssetPath(meshPath));
 
             SkinnedMeshRenderer smr = go.AddComponent<SkinnedMeshRenderer>();
@@ -632,7 +673,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             smr.localBounds = bounds;
             smr.updateWhenOffscreen = true;
 
-            smr.sharedMaterials = CreateMaterials(src, tgaFolderPath, meshFolder, baseName);
+            smr.sharedMaterials = CreateMaterials(src, tgaFolderPath, folders.Materials, folders.Textures, baseName);
         }
 
         private Mesh BuildUnityMesh(PS3DS_OBMMesh src, List<Transform> bones, string meshFolder, string baseName, int meshIndex)
@@ -1081,7 +1122,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             return 0;
         }
 
-        private Material[] CreateMaterials(PS3DS_OBMMesh src, string tgaFolderPath, string meshFolder, string baseName)
+        private Material[] CreateMaterials(PS3DS_OBMMesh src, string tgaFolderPath, string materialFolder, string textureFolder, string baseName)
         {
             int count = Mathf.Max(1, src.MaterialGroups.Count);
             Material[] mats = new Material[count];
@@ -1089,10 +1130,10 @@ namespace VirtualPhenix.PokemonSnap3DS
             for (int i = 0; i < count; i++)
             {
                 PS3DS_OBMMaterialGroup group = i < src.MaterialGroups.Count ? src.MaterialGroups[i] : null;
-                mats[i] = CreateMaterialAsset(src, group, i, tgaFolderPath, meshFolder, baseName, false);
+                mats[i] = CreateMaterialAsset(src, group, i, tgaFolderPath, materialFolder, textureFolder, baseName, false);
 
                 if (m_importShinyMaterials)
-                    CreateMaterialAsset(src, group, i, m_shinyTgaFolderPath, meshFolder, baseName, true);
+                    CreateMaterialAsset(src, group, i, m_shinyTgaFolderPath, materialFolder, textureFolder, baseName, true);
             }
 
             return mats;
@@ -1103,7 +1144,8 @@ namespace VirtualPhenix.PokemonSnap3DS
             PS3DS_OBMMaterialGroup group,
             int materialIndex,
             string textureFolderPath,
-            string meshFolder,
+            string materialFolder,
+            string textureFolder,
             string baseName,
             bool shiny)
         {
@@ -1115,7 +1157,7 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             bool canImportTexture = (!shiny && m_importTextures) || shiny;
             if (canImportTexture && group != null && group.TextureNames != null && group.TextureNames.Count > 0)
-                tex = LoadOrConvertTexture(group.TextureNames[0], textureFolderPath, meshFolder, shiny ? "_shiny" : "");
+                tex = LoadOrConvertTexture(group.TextureNames[0], textureFolderPath, textureFolder, shiny ? "_shiny" : "");
 
             Material mat = new Material(Shader.Find("Standard"));
             mat.name = shiny ? groupName + "_Shiny" : groupName;
@@ -1127,7 +1169,8 @@ namespace VirtualPhenix.PokemonSnap3DS
                 mat.mainTexture = tex;
 
             string safeMatName = baseName + "_" + src.Name + "_" + materialIndex + "_" + mat.name;
-            string matPath = meshFolder + "/" + SanitizeFileName(safeMatName) + ".mat";
+            EnsureFolder(materialFolder);
+            string matPath = materialFolder + "/" + SanitizeFileName(safeMatName) + ".mat";
             matPath = AssetDatabase.GenerateUniqueAssetPath(matPath);
 
             AssetDatabase.CreateAsset(mat, matPath);
@@ -1178,6 +1221,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                 return null;
             }
 
+            EnsureFolder(outputFolder);
             string copiedTgaPath = outputFolder + "/" + assetName + ".tga";
             copiedTgaPath = AssetDatabase.GenerateUniqueAssetPath(copiedTgaPath);
 
@@ -1465,8 +1509,11 @@ namespace VirtualPhenix.PokemonSnap3DS
             EnsureSDRArmatureIfNeeded(sdr, root);
 
             string baseName = Path.GetFileNameWithoutExtension(sdrPath);
-            string animFolder = m_outputFolder + "/" + root.name + "/Animations";
+            string importRootFolder = FindImportRootFolderForObject(root);
+            string animFolder = importRootFolder + "/Animations";
+            string controllerFolder = importRootFolder + "/Controller";
             EnsureFolder(animFolder);
+            EnsureFolder(controllerFolder);
 
             Dictionary<string, Transform> boneMap = new Dictionary<string, Transform>();
             Transform[] allTransforms = root.GetComponentsInChildren<Transform>(true);
@@ -1507,7 +1554,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             }
 
             if (m_createMecanimController && importedClips.Count > 0)
-                CreateMecanimController(root, animFolder, baseName, importedClips);
+                CreateMecanimController(root, controllerFolder, baseName, importedClips);
 
             Debug.Log("Imported SDR mecanim animation clips: " + importedCount + " from " + sdrPath);
         }
@@ -2767,7 +2814,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             GameObject selectedRoot = Selection.activeGameObject;
             string baseName = Path.GetFileNameWithoutExtension(m_obmFilePath);
             string targetFolder = GetTextureOnlyTargetFolder(selectedRoot, baseName);
-            EnsureFolder(targetFolder);
+            PS3DS_ImportAssetFolders folders = CreateImportAssetFolders(targetFolder);
 
             int assignedRendererCount = 0;
             SkinnedMeshRenderer[] renderers = selectedRoot != null ? selectedRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true) : null;
@@ -2775,7 +2822,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             for (int i = 0; i < data.Meshes.Count; i++)
             {
                 PS3DS_OBMMesh mesh = data.Meshes[i];
-                Material[] mats = CreateMaterials(mesh, m_tgaFolderPath, targetFolder, baseName);
+                Material[] mats = CreateMaterials(mesh, m_tgaFolderPath, folders.Materials, folders.Textures, baseName);
 
                 SkinnedMeshRenderer smr = FindRendererForMesh(renderers, mesh.Name, i);
                 if (smr != null)
@@ -2807,7 +2854,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                     {
                         string dir = Path.GetDirectoryName(meshPath);
                         if (!string.IsNullOrEmpty(dir))
-                            return dir.Replace("\\", "/");
+                            return GetImportRootFolderFromAssetFolder(dir.Replace("\\", "/"));
                     }
                 }
             }
@@ -3120,6 +3167,76 @@ namespace VirtualPhenix.PokemonSnap3DS
                 return "Assets" + absolutePath.Substring(dataPath.Length);
 
             return null;
+        }
+
+
+        private static string FindImportRootFolderForObject(GameObject root)
+        {
+            if (root != null)
+            {
+                SkinnedMeshRenderer smr = root.GetComponentInChildren<SkinnedMeshRenderer>(true);
+                if (smr != null && smr.sharedMesh != null)
+                {
+                    string meshPath = AssetDatabase.GetAssetPath(smr.sharedMesh);
+                    if (!string.IsNullOrEmpty(meshPath))
+                    {
+                        string dir = Path.GetDirectoryName(meshPath);
+                        if (!string.IsNullOrEmpty(dir))
+                            return GetImportRootFolderFromAssetFolder(dir.Replace("\\", "/"));
+                    }
+                }
+            }
+
+            return "Assets";
+        }
+
+        private static string GetImportRootFolderFromAssetFolder(string assetFolder)
+        {
+            if (string.IsNullOrEmpty(assetFolder))
+                return "Assets";
+
+            assetFolder = assetFolder.Replace("\\", "/");
+
+            if (assetFolder.EndsWith("/Meshes"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Meshes".Length);
+
+            if (assetFolder.EndsWith("/Mats"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Mats".Length);
+
+            if (assetFolder.EndsWith("/Tex"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Tex".Length);
+
+            if (assetFolder.EndsWith("/Animations"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Animations".Length);
+
+            if (assetFolder.EndsWith("/Controller"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Controller".Length);
+
+            if (assetFolder.EndsWith("/Prefab"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Prefab".Length);
+
+            if (assetFolder.EndsWith("/Debug"))
+                return assetFolder.Substring(0, assetFolder.Length - "/Debug".Length);
+
+            return assetFolder;
+        }
+
+        private static void CreatePrefabAsset(GameObject root, string prefabFolder, string baseName)
+        {
+            if (root == null || string.IsNullOrEmpty(prefabFolder))
+                return;
+
+            EnsureFolder(prefabFolder);
+
+            string prefabPath = prefabFolder + "/" + SanitizeFileName(baseName) + ".prefab";
+            prefabPath = AssetDatabase.GenerateUniqueAssetPath(prefabPath);
+
+#if UNITY_2018_3_OR_NEWER
+            PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+#else
+            PrefabUtility.CreatePrefab(prefabPath, root);
+#endif
+            Debug.Log("Created prefab: " + prefabPath);
         }
 
         private static string GetUniqueImportFolderPath(string parentFolder, string baseName)
