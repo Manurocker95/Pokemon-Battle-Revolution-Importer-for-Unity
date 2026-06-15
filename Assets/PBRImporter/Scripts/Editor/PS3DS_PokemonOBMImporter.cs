@@ -26,6 +26,13 @@ namespace VirtualPhenix.PokemonSnap3DS
         private bool m_applyDebugBoneColors = true;
         private int m_debugLogWeightSamples = 32;
         private float m_sdrFrameRate = 30f;
+        private PS3DS_SDRAxisCorrection m_sdrAxisCorrection = PS3DS_SDRAxisCorrection.Raw;
+        private PS3DS_ModelRootRotation m_modelRootRotation = PS3DS_ModelRootRotation.None;
+        private PS3DS_SDREulerOrder m_sdrEulerOrder = PS3DS_SDREulerOrder.XYZ;
+        private bool m_sdrUseQuaternionRotationCurves = true;
+        private bool m_sdrInvertRotationX = false;
+        private bool m_sdrInvertRotationY = false;
+        private bool m_sdrInvertRotationZ = false;
         private bool m_flipV = false;
         private float m_boundExpand = 20f;
         private bool m_convertTgaToPng = true;
@@ -82,6 +89,13 @@ namespace VirtualPhenix.PokemonSnap3DS
             m_applyDebugBoneColors = EditorGUILayout.Toggle("Apply Debug Bone Colors", m_applyDebugBoneColors);
             m_debugLogWeightSamples = EditorGUILayout.IntField("Debug VW Samples", m_debugLogWeightSamples);
             m_sdrFrameRate = EditorGUILayout.FloatField("SDR Frame Rate", m_sdrFrameRate);
+            m_sdrAxisCorrection = (PS3DS_SDRAxisCorrection)EditorGUILayout.EnumPopup("SDR Data Axis Correction", m_sdrAxisCorrection);
+            m_sdrEulerOrder = (PS3DS_SDREulerOrder)EditorGUILayout.EnumPopup("SDR Euler Order", m_sdrEulerOrder);
+            m_sdrUseQuaternionRotationCurves = EditorGUILayout.Toggle("Quaternion Rot Curves", m_sdrUseQuaternionRotationCurves);
+            m_sdrInvertRotationX = EditorGUILayout.Toggle("Invert Rot X", m_sdrInvertRotationX);
+            m_sdrInvertRotationY = EditorGUILayout.Toggle("Invert Rot Y", m_sdrInvertRotationY);
+            m_sdrInvertRotationZ = EditorGUILayout.Toggle("Invert Rot Z", m_sdrInvertRotationZ);
+            m_modelRootRotation = (PS3DS_ModelRootRotation)EditorGUILayout.EnumPopup("Model Root Rotation", m_modelRootRotation);
 
             EditorGUILayout.BeginHorizontal();
             m_sdrFilePath = EditorGUILayout.TextField("SDR/OUT File", m_sdrFilePath);
@@ -205,6 +219,9 @@ namespace VirtualPhenix.PokemonSnap3DS
                 Debug.Log("OBM has no bones. Using SDR skeleton: " + data.Bones.Count + " bones.");
             }
 
+            if (sdr != null)
+                ApplySDRWeightsToOBM(data, sdr);
+
             string baseName = Path.GetFileNameWithoutExtension(obmPath);
             GameObject root = new GameObject(baseName);
 
@@ -216,6 +233,8 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             if (sdr != null && sdr.Bones.Count > 0)
                 RebindSkinnedMeshesFromSDR(root, sdr);
+
+            ApplyModelRootRotation(root);
 
             Selection.activeGameObject = root;
             Debug.Log("Imported OBM: " + obmPath);
@@ -524,6 +543,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             go.transform.localPosition = Vector3.zero;
             go.transform.localRotation = Quaternion.identity;
             go.transform.localScale = Vector3.one;
+
             string meshFolder = m_outputFolder + "/" + baseName;
             EnsureFolder(meshFolder);
 
@@ -580,10 +600,18 @@ namespace VirtualPhenix.PokemonSnap3DS
                     int uvIndex = face.T[c];
                     int weightIndex = face.W[c];
 
-                    // Most PBR OBM dumps write one vw entry per source vertex and faces only as v/n/t.
-                    // If the face does not contain an explicit weight index, the vertex index is the correct fallback.
-                    if (weightIndex < 0 && m_useVertexIndexAsWeightFallback)
+                    // Most PBR OBM dumps write faces as v/n/t/0 even when the real skin table is one row per source vertex.
+                    // In that case /0 is not a real weight row, it is only a placeholder exported by the converter.
+                    // If src.Weights.Count matches src.Vertices.Count, prefer the source vertex index for skinning.
+                    if (m_useVertexIndexAsWeightFallback && src.Weights != null && src.Weights.Count == src.Vertices.Count && vertexIndex >= 0 && vertexIndex < src.Weights.Count)
+                    {
+                        if (weightIndex < 0 || weightIndex == 0)
+                            weightIndex = vertexIndex;
+                    }
+                    else if (weightIndex < 0 && m_useVertexIndexAsWeightFallback)
+                    {
                         weightIndex = vertexIndex;
+                    }
 
                     vertices.Add(GetVector3(src.Vertices, vertexIndex));
                     normals.Add(normalIndex >= 0 ? GetVector3(src.Normals, normalIndex) : Vector3.up);
@@ -618,6 +646,71 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             mesh.RecalculateBounds();
             return mesh;
+        }
+
+
+        private void ApplySDRWeightsToOBM(PS3DS_OBMData obm, PS3DS_SDRData sdr)
+        {
+            if (obm == null || sdr == null || sdr.MeshWeights == null || sdr.MeshWeights.Count == 0)
+                return;
+
+            for (int i = 0; i < obm.Meshes.Count; i++)
+            {
+                PS3DS_OBMMesh mesh = obm.Meshes[i];
+                if (mesh == null || mesh.Vertices == null)
+                    continue;
+
+                bool hasOBMWeights = mesh.Weights != null && mesh.Weights.Count > 0 && HasAnyRealWeight(mesh.Weights);
+                if (hasOBMWeights)
+                    continue;
+
+                if (sdr.MeshWeights.Count == mesh.Vertices.Count)
+                {
+                    mesh.Weights = CloneWeightRows(sdr.MeshWeights);
+                    Debug.Log("Applied SDR skin weights to OBM mesh '" + mesh.Name + "': " + mesh.Weights.Count + " rows.");
+                }
+                else
+                {
+                    Debug.LogWarning("SDR skin weights count does not match OBM mesh '" + mesh.Name + "'. SDR=" + sdr.MeshWeights.Count + " OBM vertices=" + mesh.Vertices.Count);
+                }
+            }
+        }
+
+        private bool HasAnyRealWeight(List<List<PS3DS_OBMWeight>> rows)
+        {
+            if (rows == null)
+                return false;
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                if (rows[i] != null && rows[i].Count > 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private List<List<PS3DS_OBMWeight>> CloneWeightRows(List<List<PS3DS_OBMWeight>> src)
+        {
+            List<List<PS3DS_OBMWeight>> result = new List<List<PS3DS_OBMWeight>>();
+
+            for (int i = 0; i < src.Count; i++)
+            {
+                List<PS3DS_OBMWeight> row = new List<PS3DS_OBMWeight>();
+                if (src[i] != null)
+                {
+                    for (int w = 0; w < src[i].Count; w++)
+                    {
+                        PS3DS_OBMWeight weight = new PS3DS_OBMWeight();
+                        weight.BoneIndex = src[i][w].BoneIndex;
+                        weight.Weight = src[i][w].Weight;
+                        row.Add(weight);
+                    }
+                }
+                result.Add(row);
+            }
+
+            return result;
         }
 
         private void DebugSkinningStats(
@@ -1165,6 +1258,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             data.ArmatureName = string.IsNullOrEmpty(sdr.SkeletonName) ? "Armature" : sdr.SkeletonName;
             data.Bones = BuildOBMBonesFromSDR(sdr);
             CreateBones(data, root.transform);
+            ApplyModelRootRotation(root);
 
             ImportSDRAnimationsFromData(sdr, m_sdrFilePath, root);
 
@@ -1189,8 +1283,10 @@ namespace VirtualPhenix.PokemonSnap3DS
                 PS3DS_OBMBone bone = new PS3DS_OBMBone();
                 bone.Name = src.Name;
                 bone.ParentName = src.ParentIndex >= 0 ? FindSDRBoneNameByIndex(sdr.Bones, src.ParentIndex) : "";
-                bone.Position = src.Position;
-                bone.Rotation = Quaternion.Euler(src.RotationEuler * Mathf.Rad2Deg);
+                bone.Position = ConvertSDRPositionForUnity(src.Position);
+                Quaternion bindRotation = CreateSDREulerQuaternion(src.BindRotationEuler);
+                Quaternion localRotation = CreateSDREulerQuaternion(src.RotationEuler);
+                bone.Rotation = ConvertSDRRotationForUnity(bindRotation * localRotation);
                 bone.Scale = src.Scale;
                 result.Add(bone);
             }
@@ -1209,13 +1305,22 @@ namespace VirtualPhenix.PokemonSnap3DS
 
         private static string FindSDRBoneNameByIndex(List<PS3DS_SDRBone> bones, int index)
         {
+            PS3DS_SDRBone bone = FindSDRBoneByIndex(bones, index);
+            return bone != null ? bone.Name : "";
+        }
+
+        private static PS3DS_SDRBone FindSDRBoneByIndex(List<PS3DS_SDRBone> bones, int index)
+        {
+            if (bones == null)
+                return null;
+
             for (int i = 0; i < bones.Count; i++)
             {
-                if (bones[i].Index == index)
-                    return bones[i].Name;
+                if (bones[i] != null && bones[i].Index == index)
+                    return bones[i];
             }
 
-            return "";
+            return null;
         }
 
         private void ImportSDRToSelected()
@@ -1287,7 +1392,7 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             RebindSkinnedMeshesFromSDR(root, sdr);
 
-            List<AnimationClip> importedClips = new List<AnimationClip>();
+            List<UnityEngine.AnimationClip> importedClips = new List<UnityEngine.AnimationClip>();
             int importedCount = 0;
             foreach (KeyValuePair<int, PS3DS_SDRAction> pair in sdr.Actions)
             {
@@ -1295,7 +1400,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                 if (action == null || action.BoneCurves.Count == 0)
                     continue;
 
-                AnimationClip clip = CreateClipFromSDRAction(action, root.transform, boneMap);
+                UnityEngine.AnimationClip clip = CreateClipFromSDRAction(action, root.transform, boneMap, sdr);
                 if (clip == null)
                     continue;
 
@@ -1308,7 +1413,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                 clipPath = AssetDatabase.GenerateUniqueAssetPath(clipPath);
                 AssetDatabase.CreateAsset(clip, clipPath);
 
-                AnimationClip savedClip = AssetDatabase.LoadAssetAtPath(clipPath, typeof(AnimationClip)) as AnimationClip;
+                UnityEngine.AnimationClip savedClip = AssetDatabase.LoadAssetAtPath(clipPath, typeof(UnityEngine.AnimationClip)) as UnityEngine.AnimationClip;
                 if (savedClip != null)
                     importedClips.Add(savedClip);
 
@@ -1402,7 +1507,13 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             Matrix4x4[] bindposes = new Matrix4x4[indexedBones.Length];
             for (int i = 0; i < indexedBones.Length; i++)
-                bindposes[i] = indexedBones[i].worldToLocalMatrix * root.transform.localToWorldMatrix;
+            {
+                PS3DS_SDRBone sdrBone = FindSDRBoneByIndex(sdr.Bones, i);
+                if (sdrBone != null && sdrBone.HasInverseBindMatrix)
+                    bindposes[i] = ConvertSDRMatrixForUnity(sdrBone.InverseBindMatrix);
+                else
+                    bindposes[i] = indexedBones[i].worldToLocalMatrix * root.transform.localToWorldMatrix;
+            }
 
             SkinnedMeshRenderer[] renderers = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
             for (int i = 0; i < renderers.Length; i++)
@@ -1424,7 +1535,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             }
         }
 
-        private void CreateMecanimController(GameObject root, string animFolder, string baseName, List<AnimationClip> clips)
+        private void CreateMecanimController(GameObject root, string animFolder, string baseName, List<UnityEngine.AnimationClip> clips)
         {
             if (root == null || clips == null || clips.Count == 0)
                 return;
@@ -1432,23 +1543,23 @@ namespace VirtualPhenix.PokemonSnap3DS
             string controllerPath = animFolder + "/" + SanitizeFileName(baseName + "_Controller") + ".controller";
             controllerPath = AssetDatabase.GenerateUniqueAssetPath(controllerPath);
 
-            AnimatorController controller = AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
-            AnimatorControllerLayer layer = controller.layers[0];
-            AnimatorStateMachine stateMachine = layer.stateMachine;
+            UnityEditor.Animations.AnimatorController controller = UnityEditor.Animations.AnimatorController.CreateAnimatorControllerAtPath(controllerPath);
+            UnityEditor.Animations.AnimatorControllerLayer layer = controller.layers[0];
+            UnityEditor.Animations.AnimatorStateMachine stateMachine = layer.stateMachine;
 
             for (int i = 0; i < clips.Count; i++)
             {
-                AnimationClip clip = clips[i];
-                AnimatorState state = stateMachine.AddState(clip.name);
+                UnityEngine.AnimationClip clip = clips[i];
+                UnityEditor.Animations.AnimatorState state = stateMachine.AddState(clip.name);
                 state.motion = clip;
 
                 if (i == 0)
                     stateMachine.defaultState = state;
             }
 
-            Animator animator = root.GetComponent<Animator>();
+            UnityEngine.Animator animator = root.GetComponent<UnityEngine.Animator>();
             if (animator == null)
-                animator = root.AddComponent<Animator>();
+                animator = root.AddComponent<UnityEngine.Animator>();
 
             animator.runtimeAnimatorController = controller;
             animator.applyRootMotion = false;
@@ -1480,9 +1591,10 @@ namespace VirtualPhenix.PokemonSnap3DS
             }
         }
 
-        private AnimationClip CreateClipFromSDRAction(PS3DS_SDRAction action, Transform root, Dictionary<string, Transform> boneMap)
+        private UnityEngine.AnimationClip CreateClipFromSDRAction(PS3DS_SDRAction action, Transform root, Dictionary<string, Transform> boneMap, PS3DS_SDRData sdr)
         {
-            AnimationClip clip = new AnimationClip();
+            UnityEngine.AnimationClip clip = new UnityEngine.AnimationClip();
+            clip.legacy = false;
             clip.name = action.Name;
 
             foreach (KeyValuePair<string, List<PS3DS_SDRFCurve>> bonePair in action.BoneCurves)
@@ -1496,10 +1608,16 @@ namespace VirtualPhenix.PokemonSnap3DS
 
                 string path = AnimationUtility.CalculateTransformPath(boneTransform, root);
 
+                if (m_sdrUseQuaternionRotationCurves)
+                    AddSparseQuaternionRotationCurvesToClip(clip, path, bonePair.Value, FindSDRBoneByName(sdr, bonePair.Key));
+
                 for (int i = 0; i < bonePair.Value.Count; i++)
                 {
                     PS3DS_SDRFCurve fcurve = bonePair.Value[i];
                     if (fcurve == null || fcurve.Keyframes.Count == 0)
+                        continue;
+
+                    if (m_sdrUseQuaternionRotationCurves && fcurve.Component == PS3DS_SDRComponent.RotationEuler)
                         continue;
 
                     AddFCurveToClip(clip, path, fcurve);
@@ -1509,7 +1627,417 @@ namespace VirtualPhenix.PokemonSnap3DS
             return clip;
         }
 
-        private void AddFCurveToClip(AnimationClip clip, string path, PS3DS_SDRFCurve fcurve)
+        private UnityEngine.AnimationClip CreateBakedClipFromSDRAction(PS3DS_SDRAction action, Transform root, Dictionary<string, Transform> boneMap, PS3DS_SDRData sdr)
+        {
+            UnityEngine.AnimationClip clip = new UnityEngine.AnimationClip();
+            clip.legacy = false;
+            clip.name = action.Name;
+
+            float duration = GetSDRActionDuration(action);
+            if (duration <= 0.0001f)
+                duration = 1f / Mathf.Max(1f, m_sdrFrameRate);
+
+            int frameCount = Mathf.Max(2, Mathf.CeilToInt(duration * Mathf.Max(1f, m_sdrFrameRate)) + 1);
+
+            foreach (KeyValuePair<string, List<PS3DS_SDRFCurve>> bonePair in action.BoneCurves)
+            {
+                Transform boneTransform = null;
+                if (!boneMap.TryGetValue(bonePair.Key, out boneTransform) || boneTransform == null)
+                {
+                    Debug.LogWarning("SDR bone not found in imported OBM armature: " + bonePair.Key);
+                    continue;
+                }
+
+                PS3DS_SDRBone sdrBone = FindSDRBoneByName(sdr, bonePair.Key);
+                Vector3 basePosition = sdrBone != null ? sdrBone.Position : boneTransform.localPosition;
+                Vector3 baseEulerRad = sdrBone != null ? sdrBone.BindRotationEuler + sdrBone.RotationEuler : boneTransform.localEulerAngles * Mathf.Deg2Rad;
+                Vector3 baseScale = sdrBone != null ? sdrBone.Scale : boneTransform.localScale;
+
+                AnimationCurve posX = new AnimationCurve();
+                AnimationCurve posY = new AnimationCurve();
+                AnimationCurve posZ = new AnimationCurve();
+                AnimationCurve rotX = new AnimationCurve();
+                AnimationCurve rotY = new AnimationCurve();
+                AnimationCurve rotZ = new AnimationCurve();
+                AnimationCurve scaleX = new AnimationCurve();
+                AnimationCurve scaleY = new AnimationCurve();
+                AnimationCurve scaleZ = new AnimationCurve();
+
+                for (int f = 0; f < frameCount; f++)
+                {
+                    float t = frameCount <= 1 ? 0f : Mathf.Min(duration, (float)f / Mathf.Max(1f, m_sdrFrameRate));
+                    Vector3 p = basePosition;
+                    Vector3 rRad = baseEulerRad;
+                    Vector3 sc = baseScale;
+
+                    ApplySampledSDRCurves(bonePair.Value, t, ref p, ref rRad, ref sc);
+
+                    p = ConvertSDRPositionForUnity(p);
+                    Quaternion q = ConvertSDRRotationForUnity(Quaternion.Euler(rRad * Mathf.Rad2Deg));
+                    Vector3 e = NormalizeEulerForClip(q.eulerAngles);
+
+                    posX.AddKey(new Keyframe(t, p.x));
+                    posY.AddKey(new Keyframe(t, p.y));
+                    posZ.AddKey(new Keyframe(t, p.z));
+                    rotX.AddKey(new Keyframe(t, e.x));
+                    rotY.AddKey(new Keyframe(t, e.y));
+                    rotZ.AddKey(new Keyframe(t, e.z));
+                    scaleX.AddKey(new Keyframe(t, sc.x));
+                    scaleY.AddKey(new Keyframe(t, sc.y));
+                    scaleZ.AddKey(new Keyframe(t, sc.z));
+                }
+
+                string path = AnimationUtility.CalculateTransformPath(boneTransform, root);
+                clip.SetCurve(path, typeof(Transform), "localPosition.x", posX);
+                clip.SetCurve(path, typeof(Transform), "localPosition.y", posY);
+                clip.SetCurve(path, typeof(Transform), "localPosition.z", posZ);
+                clip.SetCurve(path, typeof(Transform), "localEulerAnglesRaw.x", rotX);
+                clip.SetCurve(path, typeof(Transform), "localEulerAnglesRaw.y", rotY);
+                clip.SetCurve(path, typeof(Transform), "localEulerAnglesRaw.z", rotZ);
+                clip.SetCurve(path, typeof(Transform), "localScale.x", scaleX);
+                clip.SetCurve(path, typeof(Transform), "localScale.y", scaleY);
+                clip.SetCurve(path, typeof(Transform), "localScale.z", scaleZ);
+            }
+
+            return clip;
+        }
+
+        private float GetSDRActionDuration(PS3DS_SDRAction action)
+        {
+            float maxTime = 0f;
+            if (action == null)
+                return 0f;
+
+            foreach (KeyValuePair<string, List<PS3DS_SDRFCurve>> pair in action.BoneCurves)
+            {
+                for (int i = 0; i < pair.Value.Count; i++)
+                {
+                    PS3DS_SDRFCurve curve = pair.Value[i];
+                    if (curve == null || curve.Keyframes == null)
+                        continue;
+
+                    for (int k = 0; k < curve.Keyframes.Count; k++)
+                    {
+                        if (curve.Keyframes[k].Time > maxTime)
+                            maxTime = curve.Keyframes[k].Time;
+                    }
+                }
+            }
+
+            return maxTime;
+        }
+
+        private void ApplySampledSDRCurves(List<PS3DS_SDRFCurve> curves, float time, ref Vector3 position, ref Vector3 rotationRad, ref Vector3 scale)
+        {
+            if (curves == null)
+                return;
+
+            for (int i = 0; i < curves.Count; i++)
+            {
+                PS3DS_SDRFCurve fcurve = curves[i];
+                if (fcurve == null || fcurve.Keyframes == null || fcurve.Keyframes.Count == 0)
+                    continue;
+
+                if (fcurve.Axis == 0 && fcurve.DataType == PS3DS_SDRDataType.Vec3)
+                {
+                    Vector4 sampled = SampleSDRVectorCurve(fcurve, time);
+                    Vector3 v = new Vector3(sampled.x, sampled.y, sampled.z);
+                    if (fcurve.Component == PS3DS_SDRComponent.Location)
+                        position = v;
+                    else if (fcurve.Component == PS3DS_SDRComponent.RotationEuler)
+                        rotationRad = v;
+                    else if (fcurve.Component == PS3DS_SDRComponent.Scale)
+                        scale = v;
+                    continue;
+                }
+
+                int axis = fcurve.Axis - 1;
+                if (axis < 0 || axis > 2)
+                    axis = Mathf.Clamp(fcurve.ChannelIndex, 0, 2);
+
+                float value = SampleSDRFloatCurve(fcurve, time);
+                if (fcurve.Component == PS3DS_SDRComponent.Location)
+                    SetVectorAxis(ref position, axis, value);
+                else if (fcurve.Component == PS3DS_SDRComponent.RotationEuler)
+                    SetVectorAxis(ref rotationRad, axis, value);
+                else if (fcurve.Component == PS3DS_SDRComponent.Scale)
+                    SetVectorAxis(ref scale, axis, value);
+            }
+        }
+
+        private float SampleSDRFloatCurve(PS3DS_SDRFCurve curve, float time)
+        {
+            if (curve == null || curve.Keyframes == null || curve.Keyframes.Count == 0)
+                return 0f;
+
+            if (time <= curve.Keyframes[0].Time)
+                return curve.Keyframes[0].Value.x;
+
+            int last = curve.Keyframes.Count - 1;
+            if (time >= curve.Keyframes[last].Time)
+                return curve.Keyframes[last].Value.x;
+
+            for (int i = 0; i < last; i++)
+            {
+                PS3DS_SDRKeyframe a = curve.Keyframes[i];
+                PS3DS_SDRKeyframe b = curve.Keyframes[i + 1];
+                if (time >= a.Time && time <= b.Time)
+                {
+                    float span = Mathf.Max(0.00001f, b.Time - a.Time);
+                    float t = Mathf.Clamp01((time - a.Time) / span);
+                    return Mathf.Lerp(a.Value.x, b.Value.x, t);
+                }
+            }
+
+            return curve.Keyframes[last].Value.x;
+        }
+
+        private Vector4 SampleSDRVectorCurve(PS3DS_SDRFCurve curve, float time)
+        {
+            if (curve == null || curve.Keyframes == null || curve.Keyframes.Count == 0)
+                return Vector4.zero;
+
+            if (time <= curve.Keyframes[0].Time)
+                return curve.Keyframes[0].Value;
+
+            int last = curve.Keyframes.Count - 1;
+            if (time >= curve.Keyframes[last].Time)
+                return curve.Keyframes[last].Value;
+
+            for (int i = 0; i < last; i++)
+            {
+                PS3DS_SDRKeyframe a = curve.Keyframes[i];
+                PS3DS_SDRKeyframe b = curve.Keyframes[i + 1];
+                if (time >= a.Time && time <= b.Time)
+                {
+                    float span = Mathf.Max(0.00001f, b.Time - a.Time);
+                    float t = Mathf.Clamp01((time - a.Time) / span);
+                    return Vector4.Lerp(a.Value, b.Value, t);
+                }
+            }
+
+            return curve.Keyframes[last].Value;
+        }
+
+        private static void SetVectorAxis(ref Vector3 v, int axis, float value)
+        {
+            if (axis == 0)
+                v.x = value;
+            else if (axis == 1)
+                v.y = value;
+            else
+                v.z = value;
+        }
+
+        private static Vector3 NormalizeEulerForClip(Vector3 euler)
+        {
+            euler.x = NormalizeEulerAngle(euler.x);
+            euler.y = NormalizeEulerAngle(euler.y);
+            euler.z = NormalizeEulerAngle(euler.z);
+            return euler;
+        }
+
+        private static float NormalizeEulerAngle(float value)
+        {
+            while (value > 180f)
+                value -= 360f;
+            while (value < -180f)
+                value += 360f;
+            return value;
+        }
+
+        private PS3DS_SDRBone FindSDRBoneByName(PS3DS_SDRData sdr, string name)
+        {
+            if (sdr == null || sdr.Bones == null || string.IsNullOrEmpty(name))
+                return null;
+
+            for (int i = 0; i < sdr.Bones.Count; i++)
+            {
+                if (sdr.Bones[i] != null && sdr.Bones[i].Name == name)
+                    return sdr.Bones[i];
+            }
+
+            return null;
+        }
+
+        private Vector3 ConvertSDRPositionForUnity(Vector3 v)
+        {
+            return GetSDRAxisCorrectionQuaternion() * v;
+        }
+
+        private Quaternion ConvertSDRRotationForUnity(Quaternion q)
+        {
+            Quaternion c = GetSDRAxisCorrectionQuaternion();
+            return c * q * Quaternion.Inverse(c);
+        }
+
+        private Matrix4x4 ConvertSDRMatrixForUnity(Matrix4x4 m)
+        {
+            Matrix4x4 c = Matrix4x4.TRS(Vector3.zero, GetSDRAxisCorrectionQuaternion(), Vector3.one);
+            return c * m * c.inverse;
+        }
+
+        private void ApplyModelRootRotation(GameObject root)
+        {
+            if (root == null)
+                return;
+
+            root.transform.localRotation = GetModelRootRotationQuaternion();
+        }
+
+        private Quaternion GetModelRootRotationQuaternion()
+        {
+            if (m_modelRootRotation == PS3DS_ModelRootRotation.Y90)
+                return Quaternion.Euler(0f, 90f, 0f);
+            if (m_modelRootRotation == PS3DS_ModelRootRotation.YMinus90)
+                return Quaternion.Euler(0f, -90f, 0f);
+            if (m_modelRootRotation == PS3DS_ModelRootRotation.X90)
+                return Quaternion.Euler(90f, 0f, 0f);
+            if (m_modelRootRotation == PS3DS_ModelRootRotation.XMinus90)
+                return Quaternion.Euler(-90f, 0f, 0f);
+            if (m_modelRootRotation == PS3DS_ModelRootRotation.Z90)
+                return Quaternion.Euler(0f, 0f, 90f);
+            if (m_modelRootRotation == PS3DS_ModelRootRotation.ZMinus90)
+                return Quaternion.Euler(0f, 0f, -90f);
+
+            return Quaternion.identity;
+        }
+
+        private Quaternion GetSDRAxisCorrectionQuaternion()
+        {
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.RotateXMinus90)
+                return Quaternion.Euler(-90f, 0f, 0f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.RotateX90)
+                return Quaternion.Euler(90f, 0f, 0f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.RotateYMinus90)
+                return Quaternion.Euler(0f, -90f, 0f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.RotateY90)
+                return Quaternion.Euler(0f, 90f, 0f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.RotateZMinus90)
+                return Quaternion.Euler(0f, 0f, -90f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.RotateZ90)
+                return Quaternion.Euler(0f, 0f, 90f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.XMinus90_Y90)
+                return Quaternion.Euler(-90f, 90f, 0f);
+            if (m_sdrAxisCorrection == PS3DS_SDRAxisCorrection.XMinus90_YMinus90)
+                return Quaternion.Euler(-90f, -90f, 0f);
+
+            return Quaternion.identity;
+        }
+
+
+        private void AddSparseQuaternionRotationCurvesToClip(UnityEngine.AnimationClip clip, string path, List<PS3DS_SDRFCurve> curves, PS3DS_SDRBone sdrBone)
+        {
+            if (clip == null || curves == null)
+                return;
+
+            List<PS3DS_SDRFCurve> rotCurves = new List<PS3DS_SDRFCurve>();
+            List<float> times = new List<float>();
+
+            for (int i = 0; i < curves.Count; i++)
+            {
+                PS3DS_SDRFCurve curve = curves[i];
+                if (curve == null || curve.Component != PS3DS_SDRComponent.RotationEuler || curve.Keyframes.Count == 0)
+                    continue;
+
+                rotCurves.Add(curve);
+
+                for (int k = 0; k < curve.Keyframes.Count; k++)
+                    AddUniqueTime(times, curve.Keyframes[k].Time);
+            }
+
+            if (rotCurves.Count == 0 || times.Count == 0)
+                return;
+
+            times.Sort();
+
+            Vector3 baseEulerRad = Vector3.zero;
+            if (sdrBone != null)
+                baseEulerRad = sdrBone.BindRotationEuler + sdrBone.RotationEuler;
+
+            AnimationCurve qx = new AnimationCurve();
+            AnimationCurve qy = new AnimationCurve();
+            AnimationCurve qz = new AnimationCurve();
+            AnimationCurve qw = new AnimationCurve();
+
+            for (int i = 0; i < times.Count; i++)
+            {
+                float t = times[i];
+                Vector3 eulerRad = baseEulerRad;
+
+                for (int c = 0; c < rotCurves.Count; c++)
+                {
+                    PS3DS_SDRFCurve curve = rotCurves[c];
+
+                    if (curve.Axis == 0 && curve.DataType == PS3DS_SDRDataType.Vec3)
+                    {
+                        Vector4 v = SampleSDRVectorCurve(curve, t);
+                        eulerRad.x = v.x;
+                        eulerRad.y = v.y;
+                        eulerRad.z = v.z;
+                    }
+                    else
+                    {
+                        int axis = curve.Axis - 1;
+                        if (axis < 0 || axis > 2)
+                            axis = Mathf.Clamp(curve.ChannelIndex, 0, 2);
+
+                        SetVectorAxis(ref eulerRad, axis, SampleSDRFloatCurve(curve, t));
+                    }
+                }
+
+                Quaternion q = ConvertSDRRotationForUnity(CreateSDREulerQuaternion(eulerRad));
+                qx.AddKey(new Keyframe(t, q.x));
+                qy.AddKey(new Keyframe(t, q.y));
+                qz.AddKey(new Keyframe(t, q.z));
+                qw.AddKey(new Keyframe(t, q.w));
+            }
+
+            clip.SetCurve(path, typeof(Transform), "localRotation.x", qx);
+            clip.SetCurve(path, typeof(Transform), "localRotation.y", qy);
+            clip.SetCurve(path, typeof(Transform), "localRotation.z", qz);
+            clip.SetCurve(path, typeof(Transform), "localRotation.w", qw);
+        }
+
+        private static void AddUniqueTime(List<float> times, float time)
+        {
+            for (int i = 0; i < times.Count; i++)
+            {
+                if (Mathf.Abs(times[i] - time) < 0.0001f)
+                    return;
+            }
+
+            times.Add(time);
+        }
+
+        private Quaternion CreateSDREulerQuaternion(Vector3 eulerRad)
+        {
+            if (m_sdrInvertRotationX)
+                eulerRad.x = -eulerRad.x;
+            if (m_sdrInvertRotationY)
+                eulerRad.y = -eulerRad.y;
+            if (m_sdrInvertRotationZ)
+                eulerRad.z = -eulerRad.z;
+
+            Quaternion x = Quaternion.AngleAxis(eulerRad.x * Mathf.Rad2Deg, Vector3.right);
+            Quaternion y = Quaternion.AngleAxis(eulerRad.y * Mathf.Rad2Deg, Vector3.up);
+            Quaternion z = Quaternion.AngleAxis(eulerRad.z * Mathf.Rad2Deg, Vector3.forward);
+
+            if (m_sdrEulerOrder == PS3DS_SDREulerOrder.XZY)
+                return x * z * y;
+            if (m_sdrEulerOrder == PS3DS_SDREulerOrder.YXZ)
+                return y * x * z;
+            if (m_sdrEulerOrder == PS3DS_SDREulerOrder.YZX)
+                return y * z * x;
+            if (m_sdrEulerOrder == PS3DS_SDREulerOrder.ZXY)
+                return z * x * y;
+            if (m_sdrEulerOrder == PS3DS_SDREulerOrder.ZYX)
+                return z * y * x;
+
+            return x * y * z;
+        }
+
+        private void AddFCurveToClip(UnityEngine.AnimationClip clip, string path, PS3DS_SDRFCurve fcurve)
         {
             int axis = fcurve.Axis - 1;
 
@@ -1530,14 +2058,15 @@ namespace VirtualPhenix.PokemonSnap3DS
             for (int i = 0; i < fcurve.Keyframes.Count; i++)
             {
                 PS3DS_SDRKeyframe src = fcurve.Keyframes[i];
-                Keyframe key = new Keyframe(src.Time, src.Value.x);
+                float value = ConvertSDRKeyValueForUnity(fcurve.Component, src.Value.x);
+                Keyframe key = new Keyframe(src.Time, value);
                 curve.AddKey(key);
             }
 
             clip.SetCurve(path, typeof(Transform), property, curve);
         }
 
-        private void AddVector3CurveToClip(AnimationClip clip, string path, PS3DS_SDRFCurve fcurve)
+        private void AddVector3CurveToClip(UnityEngine.AnimationClip clip, string path, PS3DS_SDRFCurve fcurve)
         {
             for (int axis = 0; axis < 3; axis++)
             {
@@ -1549,11 +2078,20 @@ namespace VirtualPhenix.PokemonSnap3DS
                 for (int i = 0; i < fcurve.Keyframes.Count; i++)
                 {
                     PS3DS_SDRKeyframe src = fcurve.Keyframes[i];
-                    curve.AddKey(new Keyframe(src.Time, GetVectorComponent(src.Value, axis)));
+                    float value = ConvertSDRKeyValueForUnity(fcurve.Component, GetVectorComponent(src.Value, axis));
+                    curve.AddKey(new Keyframe(src.Time, value));
                 }
 
                 clip.SetCurve(path, typeof(Transform), property, curve);
             }
+        }
+
+        private static float ConvertSDRKeyValueForUnity(PS3DS_SDRComponent component, float value)
+        {
+            if (component == PS3DS_SDRComponent.RotationEuler)
+                return value * Mathf.Rad2Deg;
+
+            return value;
         }
 
         private static float GetVectorComponent(Vector4 v, int axis)
@@ -1641,6 +2179,149 @@ namespace VirtualPhenix.PokemonSnap3DS
             }
         }
 
+
+        private void ParseSDRMeshWeights(PS3DS_SDRReader reader, uint meshAddr, PS3DS_SDRData data, string skinNodeName)
+        {
+            if (!reader.IsValidAddress(meshAddr))
+                return;
+
+            ushort vertexCount = reader.ReadUInt16((int)meshAddr + 0x02);
+            uint weightsAddr = reader.ReadUInt32((int)meshAddr + 0x0C);
+
+            if (vertexCount == 0 || weightsAddr == 0 || !reader.IsValidAddress(weightsAddr))
+                return;
+
+            List<List<PS3DS_OBMWeight>> rows = ParseSDRWeights(reader, weightsAddr);
+
+            if (rows == null || rows.Count == 0)
+                return;
+
+            if (data.MeshWeights == null || data.MeshWeights.Count == 0 || rows.Count > data.MeshWeights.Count)
+            {
+                data.MeshWeights = rows;
+                Debug.Log("Parsed SDR skin weights from '" + skinNodeName + "': " + rows.Count + " rows. SDR vertexCount=" + vertexCount);
+            }
+
+            if (rows.Count != vertexCount)
+                Debug.LogWarning("Parsed SDR weights count differs from SDR mesh vertex count. weights=" + rows.Count + " vertexCount=" + vertexCount);
+        }
+
+        private List<List<PS3DS_OBMWeight>> ParseSDRWeights(PS3DS_SDRReader reader, uint weightsAddr)
+        {
+            List<List<PS3DS_OBMWeight>> rows = new List<List<PS3DS_OBMWeight>>();
+
+            ushort oneBoneGroupCount = reader.ReadUInt16((int)weightsAddr + 0x00);
+            uint oneBoneGroupsAddr = reader.ReadUInt32((int)weightsAddr + 0x04);
+
+            int cursor = (int)oneBoneGroupsAddr;
+            for (int i = 0; i < oneBoneGroupCount; i++)
+            {
+                ushort numVerts = reader.ReadUInt16(cursor + 0x00);
+                ushort bone = reader.ReadUInt16(cursor + 0x02);
+                cursor += 4;
+
+                for (int v = 0; v < numVerts; v++)
+                {
+                    List<PS3DS_OBMWeight> row = new List<PS3DS_OBMWeight>();
+                    AddWeight(row, bone, 1f);
+                    rows.Add(row);
+                }
+            }
+
+            ushort twoBoneGroupCount = reader.ReadUInt16((int)weightsAddr + 0x08);
+            uint twoBoneGroupsAddr = reader.ReadUInt32((int)weightsAddr + 0x0C);
+            uint twoBoneWeightsAddr = reader.ReadUInt32((int)weightsAddr + 0x10);
+
+            int weightCursor = 0;
+            for (int i = 0; i < twoBoneGroupCount; i++)
+            {
+                int groupAddr = (int)twoBoneGroupsAddr + i * 6;
+                ushort numVerts = reader.ReadUInt16(groupAddr + 0x00);
+                ushort bone1 = reader.ReadUInt16(groupAddr + 0x02);
+                ushort bone2 = reader.ReadUInt16(groupAddr + 0x04);
+
+                for (int v = 0; v < numVerts; v++)
+                {
+                    ushort raw = reader.ReadUInt16((int)twoBoneWeightsAddr + weightCursor * 2);
+                    weightCursor++;
+
+                    float w1 = (float)raw / 65535f;
+                    List<PS3DS_OBMWeight> row = new List<PS3DS_OBMWeight>();
+                    AddWeight(row, bone1, w1);
+                    AddWeight(row, bone2, 1f - w1);
+                    rows.Add(row);
+                }
+            }
+
+            ushort extraWeightCount = reader.ReadUInt16((int)weightsAddr + 0x14);
+            uint extraWeightsAddr = reader.ReadUInt32((int)weightsAddr + 0x18);
+
+            int extraCursor = (int)extraWeightsAddr;
+            for (int i = 0; i < extraWeightCount; i++)
+            {
+                ushort vertexIndex = reader.ReadUInt16(extraCursor + 0x00);
+                ushort bone1 = reader.ReadUInt16(extraCursor + 0x02);
+                ushort bone2 = reader.ReadUInt16(extraCursor + 0x04);
+                ushort rawWeight1 = reader.ReadUInt16(extraCursor + 0x06);
+                ushort rawWeight2 = reader.ReadUInt16(extraCursor + 0x08);
+                extraCursor += 10;
+
+                if (vertexIndex >= rows.Count)
+                    continue;
+
+                float w1 = (float)rawWeight1 / 65535f;
+                float w2 = (float)rawWeight2 / 65535f;
+                float remaining = Mathf.Clamp01(1f - w1 - w2);
+
+                for (int w = 0; w < rows[vertexIndex].Count; w++)
+                    rows[vertexIndex][w].Weight *= remaining;
+
+                AddWeight(rows[vertexIndex], bone1, w1);
+                if (bone2 != 0xFFFF)
+                    AddWeight(rows[vertexIndex], bone2, w2);
+
+                NormalizeWeights(rows[vertexIndex]);
+            }
+
+            return rows;
+        }
+
+        private void AddWeight(List<PS3DS_OBMWeight> row, int boneIndex, float weight)
+        {
+            if (row == null || boneIndex < 0 || weight <= 0.00001f)
+                return;
+
+            for (int i = 0; i < row.Count; i++)
+            {
+                if (row[i].BoneIndex == boneIndex)
+                {
+                    row[i].Weight += weight;
+                    return;
+                }
+            }
+
+            PS3DS_OBMWeight newWeight = new PS3DS_OBMWeight();
+            newWeight.BoneIndex = boneIndex;
+            newWeight.Weight = weight;
+            row.Add(newWeight);
+        }
+
+        private void NormalizeWeights(List<PS3DS_OBMWeight> row)
+        {
+            if (row == null)
+                return;
+
+            float total = 0f;
+            for (int i = 0; i < row.Count; i++)
+                total += row[i].Weight;
+
+            if (total <= 0.00001f)
+                return;
+
+            for (int i = 0; i < row.Count; i++)
+                row[i].Weight /= total;
+        }
+
         private void ParseSDRBoneRecursive(PS3DS_SDRReader reader, uint address, PS3DS_SDRData data, int parentIndex)
         {
             if (!reader.IsValidAddress(address))
@@ -1652,14 +2333,41 @@ namespace VirtualPhenix.PokemonSnap3DS
                 boneName = "Bone_" + reader.ReadUInt16((int)address + 0x08);
 
             int boneIndex = reader.ReadUInt16((int)address + 0x08);
+            uint nodeType = reader.ReadUInt32((int)address + 0x00);
+
             PS3DS_SDRBone sdrBone = new PS3DS_SDRBone();
             sdrBone.Index = boneIndex;
             sdrBone.Name = boneName;
             sdrBone.ParentIndex = parentIndex;
+            sdrBone.NodeType = (int)nodeType;
             sdrBone.Position = ReadOptionalVec3(reader, reader.ReadUInt32((int)address + 0x0C), Vector3.zero);
             sdrBone.RotationEuler = ReadOptionalVec3(reader, reader.ReadUInt32((int)address + 0x10), Vector3.zero);
             sdrBone.Scale = ReadOptionalVec3(reader, reader.ReadUInt32((int)address + 0x14), Vector3.one);
+
+            if (nodeType == 2)
+            {
+                sdrBone.BindRotationEuler = new Vector3(
+                    reader.ReadFloat((int)address + 0x34),
+                    reader.ReadFloat((int)address + 0x38),
+                    reader.ReadFloat((int)address + 0x3C));
+
+                sdrBone.InverseBindMatrix = ReadSDRMatrix3x4(reader, (int)address + 0x44);
+                sdrBone.HasInverseBindMatrix = true;
+            }
+            else
+            {
+                sdrBone.BindRotationEuler = Vector3.zero;
+                sdrBone.InverseBindMatrix = Matrix4x4.identity;
+                sdrBone.HasInverseBindMatrix = false;
+            }
+
             AddOrReplaceSDRBone(data, sdrBone);
+            if (nodeType == 3)
+            {
+                uint meshAddr = reader.ReadUInt32((int)address + 0x30);
+                if (meshAddr != 0)
+                    ParseSDRMeshWeights(reader, meshAddr, data, boneName);
+            }
 
             uint animDataAddr = reader.ReadUInt32((int)address + 0x20);
             if (animDataAddr != 0)
@@ -1680,6 +2388,23 @@ namespace VirtualPhenix.PokemonSnap3DS
                 return fallback;
 
             return new Vector3(reader.ReadFloat((int)address), reader.ReadFloat((int)address + 4), reader.ReadFloat((int)address + 8));
+        }
+
+        private static Matrix4x4 ReadSDRMatrix3x4(PS3DS_SDRReader reader, int address)
+        {
+            Matrix4x4 m = Matrix4x4.identity;
+
+            for (int r = 0; r < 3; r++)
+            {
+                for (int c = 0; c < 4; c++)
+                    m[r, c] = reader.ReadFloat(address + (r * 4 + c) * 4);
+            }
+
+            m[3, 0] = 0f;
+            m[3, 1] = 0f;
+            m[3, 2] = 0f;
+            m[3, 3] = 1f;
+            return m;
         }
 
         private static void AddOrReplaceSDRBone(PS3DS_SDRData data, PS3DS_SDRBone bone)
@@ -1930,6 +2655,40 @@ namespace VirtualPhenix.PokemonSnap3DS
         }
 
 
+        private enum PS3DS_SDREulerOrder
+        {
+            XYZ,
+            XZY,
+            YXZ,
+            YZX,
+            ZXY,
+            ZYX
+        }
+
+        private enum PS3DS_ModelRootRotation
+        {
+            None,
+            Y90,
+            YMinus90,
+            X90,
+            XMinus90,
+            Z90,
+            ZMinus90
+        }
+
+        private enum PS3DS_SDRAxisCorrection
+        {
+            Raw,
+            RotateXMinus90,
+            RotateX90,
+            RotateYMinus90,
+            RotateY90,
+            RotateZMinus90,
+            RotateZ90,
+            XMinus90_Y90,
+            XMinus90_YMinus90
+        }
+
         private enum PS3DS_SDRComponent
         {
             Location = 0,
@@ -1953,6 +2712,7 @@ namespace VirtualPhenix.PokemonSnap3DS
         {
             public string SkeletonName = "Armature";
             public List<PS3DS_SDRBone> Bones = new List<PS3DS_SDRBone>();
+            public List<List<PS3DS_OBMWeight>> MeshWeights = new List<List<PS3DS_OBMWeight>>();
             public Dictionary<int, PS3DS_SDRAction> Actions = new Dictionary<int, PS3DS_SDRAction>();
         }
 
@@ -1961,9 +2721,13 @@ namespace VirtualPhenix.PokemonSnap3DS
             public int Index;
             public string Name;
             public int ParentIndex;
+            public int NodeType;
             public Vector3 Position;
             public Vector3 RotationEuler;
+            public Vector3 BindRotationEuler;
             public Vector3 Scale;
+            public Matrix4x4 InverseBindMatrix = Matrix4x4.identity;
+            public bool HasInverseBindMatrix;
         }
 
         private class PS3DS_SDRAction
