@@ -28,11 +28,12 @@ namespace VirtualPhenix.PokemonSnap3DS
         private float m_sdrFrameRate = 30f;
         private PS3DS_SDRAxisCorrection m_sdrAxisCorrection = PS3DS_SDRAxisCorrection.Raw;
         private PS3DS_ModelRootRotation m_modelRootRotation = PS3DS_ModelRootRotation.None;
-        private PS3DS_SDREulerOrder m_sdrEulerOrder = PS3DS_SDREulerOrder.XYZ;
+        private PS3DS_SDREulerOrder m_sdrEulerOrder = PS3DS_SDREulerOrder.ZYX;
         private bool m_sdrUseQuaternionRotationCurves = true;
         private bool m_sdrInvertRotationX = false;
         private bool m_sdrInvertRotationY = false;
         private bool m_sdrInvertRotationZ = false;
+        private PS3DS_SDRAnimationValueMode m_sdrAnimationValueMode = PS3DS_SDRAnimationValueMode.RelativeToFirstFrame;
         private bool m_flipV = false;
         private float m_boundExpand = 20f;
         private bool m_convertTgaToPng = true;
@@ -95,6 +96,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             m_sdrInvertRotationX = EditorGUILayout.Toggle("Invert Rot X", m_sdrInvertRotationX);
             m_sdrInvertRotationY = EditorGUILayout.Toggle("Invert Rot Y", m_sdrInvertRotationY);
             m_sdrInvertRotationZ = EditorGUILayout.Toggle("Invert Rot Z", m_sdrInvertRotationZ);
+            m_sdrAnimationValueMode = (PS3DS_SDRAnimationValueMode)EditorGUILayout.EnumPopup("SDR Anim Value Mode", m_sdrAnimationValueMode);
             m_modelRootRotation = (PS3DS_ModelRootRotation)EditorGUILayout.EnumPopup("Model Root Rotation", m_modelRootRotation);
 
             EditorGUILayout.BeginHorizontal();
@@ -1609,7 +1611,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                 string path = AnimationUtility.CalculateTransformPath(boneTransform, root);
 
                 if (m_sdrUseQuaternionRotationCurves)
-                    AddSparseQuaternionRotationCurvesToClip(clip, path, bonePair.Value, FindSDRBoneByName(sdr, bonePair.Key));
+                    AddSparseQuaternionRotationCurvesToClip(clip, path, bonePair.Value, FindSDRBoneByName(sdr, bonePair.Key), boneTransform);
 
                 for (int i = 0; i < bonePair.Value.Count; i++)
                 {
@@ -1926,7 +1928,7 @@ namespace VirtualPhenix.PokemonSnap3DS
         }
 
 
-        private void AddSparseQuaternionRotationCurvesToClip(UnityEngine.AnimationClip clip, string path, List<PS3DS_SDRFCurve> curves, PS3DS_SDRBone sdrBone)
+        private void AddSparseQuaternionRotationCurvesToClip(UnityEngine.AnimationClip clip, string path, List<PS3DS_SDRFCurve> curves, PS3DS_SDRBone sdrBone, Transform unityBone)
         {
             if (clip == null || curves == null)
                 return;
@@ -1960,33 +1962,29 @@ namespace VirtualPhenix.PokemonSnap3DS
             AnimationCurve qz = new AnimationCurve();
             AnimationCurve qw = new AnimationCurve();
 
+            UnityEngine.Quaternion restUnityRotation = unityBone != null ? unityBone.localRotation : UnityEngine.Quaternion.identity;
+            UnityEngine.Quaternion baseRawRotation = ConvertSDRRotationForUnity(CreateSDREulerQuaternion(baseEulerRad));
+
+            if (m_sdrAnimationValueMode == PS3DS_SDRAnimationValueMode.RelativeToFirstFrame)
+            {
+                Vector3 firstEulerRad = EvaluateSDRRotationEulerAtTime(rotCurves, times[0], baseEulerRad);
+                baseRawRotation = ConvertSDRRotationForUnity(CreateSDREulerQuaternion(firstEulerRad));
+            }
+
             for (int i = 0; i < times.Count; i++)
             {
                 float t = times[i];
-                Vector3 eulerRad = baseEulerRad;
+                Vector3 eulerRad = EvaluateSDRRotationEulerAtTime(rotCurves, t, baseEulerRad);
 
-                for (int c = 0; c < rotCurves.Count; c++)
+                UnityEngine.Quaternion q = ConvertSDRRotationForUnity(CreateSDREulerQuaternion(eulerRad));
+
+                if (m_sdrAnimationValueMode == PS3DS_SDRAnimationValueMode.RelativeToRestPose ||
+                    m_sdrAnimationValueMode == PS3DS_SDRAnimationValueMode.RelativeToFirstFrame)
                 {
-                    PS3DS_SDRFCurve curve = rotCurves[c];
-
-                    if (curve.Axis == 0 && curve.DataType == PS3DS_SDRDataType.Vec3)
-                    {
-                        Vector4 v = SampleSDRVectorCurve(curve, t);
-                        eulerRad.x = v.x;
-                        eulerRad.y = v.y;
-                        eulerRad.z = v.z;
-                    }
-                    else
-                    {
-                        int axis = curve.Axis - 1;
-                        if (axis < 0 || axis > 2)
-                            axis = Mathf.Clamp(curve.ChannelIndex, 0, 2);
-
-                        SetVectorAxis(ref eulerRad, axis, SampleSDRFloatCurve(curve, t));
-                    }
+                    UnityEngine.Quaternion delta = UnityEngine.Quaternion.Inverse(baseRawRotation) * q;
+                    q = restUnityRotation * delta;
                 }
 
-                Quaternion q = ConvertSDRRotationForUnity(CreateSDREulerQuaternion(eulerRad));
                 qx.AddKey(new Keyframe(t, q.x));
                 qy.AddKey(new Keyframe(t, q.y));
                 qz.AddKey(new Keyframe(t, q.z));
@@ -2009,6 +2007,39 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             times.Add(time);
         }
+        private Vector3 EvaluateSDRRotationEulerAtTime(List<PS3DS_SDRFCurve> rotCurves, float time, Vector3 baseEulerRad)
+        {
+            Vector3 eulerRad = baseEulerRad;
+
+            if (rotCurves == null)
+                return eulerRad;
+
+            for (int c = 0; c < rotCurves.Count; c++)
+            {
+                PS3DS_SDRFCurve curve = rotCurves[c];
+                if (curve == null)
+                    continue;
+
+                if (curve.Axis == 0 && curve.DataType == PS3DS_SDRDataType.Vec3)
+                {
+                    Vector4 v = SampleSDRVectorCurve(curve, time);
+                    eulerRad.x = v.x;
+                    eulerRad.y = v.y;
+                    eulerRad.z = v.z;
+                }
+                else
+                {
+                    int axis = curve.Axis - 1;
+                    if (axis < 0 || axis > 2)
+                        axis = Mathf.Clamp(curve.ChannelIndex, 0, 2);
+
+                    SetVectorAxis(ref eulerRad, axis, SampleSDRFloatCurve(curve, time));
+                }
+            }
+
+            return eulerRad;
+        }
+
 
         private Quaternion CreateSDREulerQuaternion(Vector3 eulerRad)
         {
@@ -2663,6 +2694,13 @@ namespace VirtualPhenix.PokemonSnap3DS
             YZX,
             ZXY,
             ZYX
+        }
+
+        private enum PS3DS_SDRAnimationValueMode
+        {
+            AbsoluteRaw,
+            RelativeToRestPose,
+            RelativeToFirstFrame
         }
 
         private enum PS3DS_ModelRootRotation
