@@ -21,9 +21,9 @@ namespace VirtualPhenix.PokemonSnap3DS
         private bool m_importMatchingSDR = false;
         private bool m_createMecanimController = true;
         private bool m_useVertexIndexAsWeightFallback = true;
-        private bool m_debugSkinningStats = true;
-        private bool m_exportSkinningDebugCsv = true;
-        private bool m_applyDebugBoneColors = true;
+        private bool m_debugSkinningStats = false;
+        private bool m_exportSkinningDebugCsv = false;
+        private bool m_applyDebugBoneColors = false;
         private int m_debugLogWeightSamples = 32;
         private float m_sdrFrameRate = 30f;
         private PS3DS_SDRAxisCorrection m_sdrAxisCorrection = PS3DS_SDRAxisCorrection.Raw;
@@ -35,8 +35,11 @@ namespace VirtualPhenix.PokemonSnap3DS
         private bool m_sdrInvertRotationZ = false;
         private PS3DS_SDRAnimationValueMode m_sdrAnimationValueMode = PS3DS_SDRAnimationValueMode.RelativeToFirstFrame;
         private bool m_flipV = false;
-        private float m_boundExpand = 20f;
+        private float m_boundExpand = 5f;
         private bool m_convertTgaToPng = true;
+        private bool m_importTextures = true;
+        private bool m_importShinyMaterials = false;
+        private string m_shinyTgaFolderPath = "";
         private string m_outputFolder = "Assets/PS3DS_OBM_Imported";
 
         [MenuItem("PS3DS/Battle Revolution/Import Pokemon OBM")]
@@ -56,7 +59,11 @@ namespace VirtualPhenix.PokemonSnap3DS
                 EditorGUILayout.BeginHorizontal();
                 m_obmFolderPath = EditorGUILayout.TextField("OBM Folder", m_obmFolderPath);
                 if (GUILayout.Button("...", GUILayout.Width(30)))
-                    m_obmFolderPath = EditorUtility.OpenFolderPanel("Select OBM Folder", "", "");
+                {
+                    string selected = EditorUtility.OpenFolderPanel("Select OBM Folder", GetPanelDirectory(m_obmFolderPath), "");
+                    if (!string.IsNullOrEmpty(selected))
+                        m_obmFolderPath = selected;
+                }
                 EditorGUILayout.EndHorizontal();
             }
             else
@@ -64,18 +71,63 @@ namespace VirtualPhenix.PokemonSnap3DS
                 EditorGUILayout.BeginHorizontal();
                 m_obmFilePath = EditorGUILayout.TextField("OBM File", m_obmFilePath);
                 if (GUILayout.Button("...", GUILayout.Width(30)))
-                    m_obmFilePath = EditorUtility.OpenFilePanel("Select OBM File", "", "obm");
+                {
+                    string selected = EditorUtility.OpenFilePanel("Select OBM File", GetPanelDirectory(m_obmFilePath), "obm");
+                    if (!string.IsNullOrEmpty(selected))
+                        m_obmFilePath = selected;
+                }
                 EditorGUILayout.EndHorizontal();
             }
 
             EditorGUILayout.BeginHorizontal();
             m_tgaFolderPath = EditorGUILayout.TextField("TGA Folder", m_tgaFolderPath);
             if (GUILayout.Button("...", GUILayout.Width(30)))
-                m_tgaFolderPath = EditorUtility.OpenFolderPanel("Select TGA Folder", "", "");
+            {
+                string selected = EditorUtility.OpenFolderPanel("Select TGA Folder", GetPanelDirectory(m_tgaFolderPath), "");
+                if (!string.IsNullOrEmpty(selected))
+                    m_tgaFolderPath = selected;
+            }
             EditorGUILayout.EndHorizontal();
+
+            m_importTextures = EditorGUILayout.Toggle("Import Textures", m_importTextures);
+            m_importShinyMaterials = EditorGUILayout.Toggle("Import Shiny Materials", m_importShinyMaterials);
+
+            if (m_importShinyMaterials)
+            {
+                EditorGUILayout.BeginHorizontal();
+                m_shinyTgaFolderPath = EditorGUILayout.TextField("Shiny TGA Folder", m_shinyTgaFolderPath);
+                if (GUILayout.Button("...", GUILayout.Width(30)))
+                {
+                    string selected = EditorUtility.OpenFolderPanel("Select Shiny TGA Folder", GetPanelDirectory(m_shinyTgaFolderPath), "");
+                    if (!string.IsNullOrEmpty(selected))
+                        m_shinyTgaFolderPath = selected;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+
             m_convertTgaToPng = EditorGUILayout.Toggle("Convert TGA To PNG", m_convertTgaToPng);
+            if (GUILayout.Button("Check OBM Texture Files"))
+                CheckSelectedOBMTextureFiles();
+
+            if (GUILayout.Button("Import Textures Only To Selected/Folder"))
+                ImportTexturesOnly();
             m_flipV = EditorGUILayout.Toggle("Flip V UV", m_flipV);
+
+            EditorGUILayout.BeginHorizontal();
             m_outputFolder = EditorGUILayout.TextField("Output Folder", m_outputFolder);
+            if (GUILayout.Button("...", GUILayout.Width(30)))
+            {
+                string selected = EditorUtility.OpenFolderPanel("Select Output Folder", GetOutputPanelDirectory(m_outputFolder), "");
+                if (!string.IsNullOrEmpty(selected))
+                {
+                    string assetPath = AbsolutePathToAssetPath(selected);
+                    if (!string.IsNullOrEmpty(assetPath))
+                        m_outputFolder = assetPath;
+                    else
+                        Debug.LogWarning("Output folder must be inside this Unity project's Assets folder. Previous output folder kept: " + m_outputFolder);
+                }
+            }
+            EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(10);
             m_boundExpand = EditorGUILayout.FloatField("Bound Expand", m_boundExpand);
@@ -102,7 +154,11 @@ namespace VirtualPhenix.PokemonSnap3DS
             EditorGUILayout.BeginHorizontal();
             m_sdrFilePath = EditorGUILayout.TextField("SDR/OUT File", m_sdrFilePath);
             if (GUILayout.Button("...", GUILayout.Width(30)))
-                m_sdrFilePath = EditorUtility.OpenFilePanel("Select SDR/OUT File", "", "sdr,out");
+            {
+                string selected = EditorUtility.OpenFilePanel("Select SDR/OUT File", GetPanelDirectory(m_sdrFilePath), "sdr,out");
+                if (!string.IsNullOrEmpty(selected))
+                    m_sdrFilePath = selected;
+            }
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(10);
@@ -118,6 +174,9 @@ namespace VirtualPhenix.PokemonSnap3DS
 
             if (GUILayout.Button("Import SDR Only / Create Armature"))
                 ImportSDROnly();
+
+            if (GUILayout.Button("Validate Selected Import"))
+                ValidateSelectedImport();
         }
 
         private void Import()
@@ -224,14 +283,18 @@ namespace VirtualPhenix.PokemonSnap3DS
             if (sdr != null)
                 ApplySDRWeightsToOBM(data, sdr);
 
-            string baseName = Path.GetFileNameWithoutExtension(obmPath);
+            string originalBaseName = Path.GetFileNameWithoutExtension(obmPath);
+            string importFolder = GetUniqueImportFolderPath(m_outputFolder, originalBaseName);
+            EnsureFolder(importFolder);
+
+            string baseName = Path.GetFileName(importFolder);
             GameObject root = new GameObject(baseName);
 
             List<Transform> bones = CreateBones(data, root.transform);
             Matrix4x4[] bindposes = CreateBindposes(bones);
 
             for (int i = 0; i < data.Meshes.Count; i++)
-                CreateMeshObject(data.Meshes[i], data, root.transform, bones, bindposes, tgaFolderPath, baseName, i);
+                CreateMeshObject(data.Meshes[i], data, root.transform, bones, bindposes, tgaFolderPath, baseName, importFolder, i);
 
             if (sdr != null && sdr.Bones.Count > 0)
                 RebindSkinnedMeshesFromSDR(root, sdr);
@@ -538,6 +601,7 @@ namespace VirtualPhenix.PokemonSnap3DS
             Matrix4x4[] bindposes,
             string tgaFolderPath,
             string baseName,
+            string meshFolder,
             int meshIndex)
         {
             GameObject go = new GameObject(src.Name);
@@ -546,7 +610,6 @@ namespace VirtualPhenix.PokemonSnap3DS
             go.transform.localRotation = Quaternion.identity;
             go.transform.localScale = Vector3.one;
 
-            string meshFolder = m_outputFolder + "/" + baseName;
             EnsureFolder(meshFolder);
 
             Mesh mesh = BuildUnityMesh(src, bones, meshFolder, baseName, meshIndex);
@@ -1026,40 +1089,55 @@ namespace VirtualPhenix.PokemonSnap3DS
             for (int i = 0; i < count; i++)
             {
                 PS3DS_OBMMaterialGroup group = i < src.MaterialGroups.Count ? src.MaterialGroups[i] : null;
+                mats[i] = CreateMaterialAsset(src, group, i, tgaFolderPath, meshFolder, baseName, false);
 
-                string groupName = group != null ? group.Name : "Material";
-                if (string.IsNullOrEmpty(groupName))
-                    groupName = "Material";
-
-                Texture2D tex = null;
-
-                if (group != null && group.TextureNames != null && group.TextureNames.Count > 0)
-                    tex = LoadOrConvertTexture(group.TextureNames[0], tgaFolderPath, meshFolder);
-
-                Material mat = new Material(Shader.Find("Standard"));
-                mat.name = groupName;
-
-                if (group != null)
-                    mat.color = group.Color;
-
-                if (tex != null)
-                    mat.mainTexture = tex;
-
-                string safeMatName = baseName + "_" + src.Name + "_" + i + "_" + groupName;
-                string matPath = meshFolder + "/" + SanitizeFileName(safeMatName) + ".mat";
-                matPath = AssetDatabase.GenerateUniqueAssetPath(matPath);
-
-                AssetDatabase.CreateAsset(mat, matPath);
-
-                Material savedMat = AssetDatabase.LoadAssetAtPath(matPath, typeof(Material)) as Material;
-
-                if (savedMat != null)
-                    mats[i] = savedMat;
-                else
-                    mats[i] = mat;
+                if (m_importShinyMaterials)
+                    CreateMaterialAsset(src, group, i, m_shinyTgaFolderPath, meshFolder, baseName, true);
             }
 
             return mats;
+        }
+
+        private Material CreateMaterialAsset(
+            PS3DS_OBMMesh src,
+            PS3DS_OBMMaterialGroup group,
+            int materialIndex,
+            string textureFolderPath,
+            string meshFolder,
+            string baseName,
+            bool shiny)
+        {
+            string groupName = group != null ? group.Name : "Material";
+            if (string.IsNullOrEmpty(groupName))
+                groupName = "Material";
+
+            Texture2D tex = null;
+
+            bool canImportTexture = (!shiny && m_importTextures) || shiny;
+            if (canImportTexture && group != null && group.TextureNames != null && group.TextureNames.Count > 0)
+                tex = LoadOrConvertTexture(group.TextureNames[0], textureFolderPath, meshFolder, shiny ? "_shiny" : "");
+
+            Material mat = new Material(Shader.Find("Standard"));
+            mat.name = shiny ? groupName + "_Shiny" : groupName;
+
+            if (group != null)
+                mat.color = group.Color;
+
+            if (tex != null)
+                mat.mainTexture = tex;
+
+            string safeMatName = baseName + "_" + src.Name + "_" + materialIndex + "_" + mat.name;
+            string matPath = meshFolder + "/" + SanitizeFileName(safeMatName) + ".mat";
+            matPath = AssetDatabase.GenerateUniqueAssetPath(matPath);
+
+            AssetDatabase.CreateAsset(mat, matPath);
+
+            Material savedMat = AssetDatabase.LoadAssetAtPath(matPath, typeof(Material)) as Material;
+
+            if (savedMat != null)
+                return savedMat;
+
+            return mat;
         }
 
         private static string SanitizeFileName(string name)
@@ -1082,10 +1160,16 @@ namespace VirtualPhenix.PokemonSnap3DS
 
         private Texture2D LoadOrConvertTexture(string texName, string tgaFolderPath, string outputFolder)
         {
+            return LoadOrConvertTexture(texName, tgaFolderPath, outputFolder, "");
+        }
+
+        private Texture2D LoadOrConvertTexture(string texName, string tgaFolderPath, string outputFolder, string assetSuffix)
+        {
             if (string.IsNullOrEmpty(texName) || string.IsNullOrEmpty(tgaFolderPath))
                 return null;
 
             string cleanName = Path.GetFileNameWithoutExtension(texName);
+            string assetName = cleanName + assetSuffix;
             string tgaPath = FindExternalFileInsensitive(tgaFolderPath, cleanName, ".tga");
 
             if (string.IsNullOrEmpty(tgaPath))
@@ -1094,7 +1178,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                 return null;
             }
 
-            string copiedTgaPath = outputFolder + "/" + cleanName + ".tga";
+            string copiedTgaPath = outputFolder + "/" + assetName + ".tga";
             copiedTgaPath = AssetDatabase.GenerateUniqueAssetPath(copiedTgaPath);
 
             File.Copy(tgaPath, copiedTgaPath, true);
@@ -1134,7 +1218,7 @@ namespace VirtualPhenix.PokemonSnap3DS
                 return tga;
             }
 
-            string pngPath = outputFolder + "/" + cleanName + ".png";
+            string pngPath = outputFolder + "/" + assetName + ".png";
             pngPath = AssetDatabase.GenerateUniqueAssetPath(pngPath);
 
             byte[] pngBytes = readableCopy.EncodeToPNG();
@@ -2662,6 +2746,399 @@ namespace VirtualPhenix.PokemonSnap3DS
                 return list[index];
 
             return Vector2.zero;
+        }
+
+
+        private void ImportTexturesOnly()
+        {
+            if (string.IsNullOrEmpty(m_obmFilePath) || !File.Exists(m_obmFilePath))
+            {
+                Debug.LogError("Select a valid OBM file first.");
+                return;
+            }
+
+            PS3DS_OBMData data = ParseOBM(m_obmFilePath);
+            if (data == null || data.Meshes == null || data.Meshes.Count == 0)
+            {
+                Debug.LogError("Invalid OBM: " + m_obmFilePath);
+                return;
+            }
+
+            GameObject selectedRoot = Selection.activeGameObject;
+            string baseName = Path.GetFileNameWithoutExtension(m_obmFilePath);
+            string targetFolder = GetTextureOnlyTargetFolder(selectedRoot, baseName);
+            EnsureFolder(targetFolder);
+
+            int assignedRendererCount = 0;
+            SkinnedMeshRenderer[] renderers = selectedRoot != null ? selectedRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true) : null;
+
+            for (int i = 0; i < data.Meshes.Count; i++)
+            {
+                PS3DS_OBMMesh mesh = data.Meshes[i];
+                Material[] mats = CreateMaterials(mesh, m_tgaFolderPath, targetFolder, baseName);
+
+                SkinnedMeshRenderer smr = FindRendererForMesh(renderers, mesh.Name, i);
+                if (smr != null)
+                {
+                    smr.sharedMaterials = mats;
+                    EditorUtility.SetDirty(smr);
+                    assignedRendererCount++;
+                }
+            }
+
+            AssetDatabase.SaveAssets();
+            AssetDatabase.Refresh();
+
+            if (renderers != null && renderers.Length > 0)
+                Debug.Log("Imported textures/materials only. Assigned materials to renderers: " + assignedRendererCount + ". Folder: " + targetFolder);
+            else
+                Debug.Log("Imported textures/materials only. No selected imported root found, assets were created in: " + targetFolder);
+        }
+
+        private string GetTextureOnlyTargetFolder(GameObject selectedRoot, string baseName)
+        {
+            if (selectedRoot != null)
+            {
+                SkinnedMeshRenderer smr = selectedRoot.GetComponentInChildren<SkinnedMeshRenderer>(true);
+                if (smr != null && smr.sharedMesh != null)
+                {
+                    string meshPath = AssetDatabase.GetAssetPath(smr.sharedMesh);
+                    if (!string.IsNullOrEmpty(meshPath))
+                    {
+                        string dir = Path.GetDirectoryName(meshPath);
+                        if (!string.IsNullOrEmpty(dir))
+                            return dir.Replace("\\", "/");
+                    }
+                }
+            }
+
+            return GetUniqueImportFolderPath(m_outputFolder, baseName + "_Textures");
+        }
+
+        private SkinnedMeshRenderer FindRendererForMesh(SkinnedMeshRenderer[] renderers, string meshName, int meshIndex)
+        {
+            if (renderers == null || renderers.Length == 0)
+                return null;
+
+            for (int i = 0; i < renderers.Length; i++)
+            {
+                if (renderers[i] != null && renderers[i].name == meshName)
+                    return renderers[i];
+            }
+
+            if (meshIndex >= 0 && meshIndex < renderers.Length)
+                return renderers[meshIndex];
+
+            return null;
+        }
+
+        private void CheckSelectedOBMTextureFiles()
+        {
+            string obmPath = m_obmFilePath;
+            if (m_importFolder)
+            {
+                if (string.IsNullOrEmpty(m_obmFolderPath) || !Directory.Exists(m_obmFolderPath))
+                {
+                    Debug.LogError("Select a valid OBM folder first.");
+                    return;
+                }
+
+                string[] files = Directory.GetFiles(m_obmFolderPath, "*.obm", SearchOption.TopDirectoryOnly);
+                int totalMissing = 0;
+                for (int i = 0; i < files.Length; i++)
+                    totalMissing += CheckTextureFilesForOBM(files[i], false);
+
+                if (totalMissing == 0)
+                    Debug.Log("Texture check OK for OBM folder: " + m_obmFolderPath);
+                else
+                    Debug.LogWarning("Texture check found missing textures: " + totalMissing);
+                return;
+            }
+
+            if (string.IsNullOrEmpty(obmPath) || !File.Exists(obmPath))
+            {
+                Debug.LogError("Select a valid OBM file first.");
+                return;
+            }
+
+            int missing = CheckTextureFilesForOBM(obmPath, true);
+            if (missing == 0)
+                Debug.Log("Texture check OK: " + obmPath);
+            else
+                Debug.LogWarning("Texture check found missing textures: " + missing + " in " + obmPath);
+        }
+
+        private int CheckTextureFilesForOBM(string obmPath, bool logFound)
+        {
+            PS3DS_OBMData data = ParseOBM(obmPath);
+            if (data == null || data.Meshes == null)
+                return 0;
+
+            int missing = 0;
+            int found = 0;
+            Dictionary<string, bool> checkedTextures = new Dictionary<string, bool>();
+
+            for (int m = 0; m < data.Meshes.Count; m++)
+            {
+                PS3DS_OBMMesh mesh = data.Meshes[m];
+                for (int g = 0; g < mesh.MaterialGroups.Count; g++)
+                {
+                    PS3DS_OBMMaterialGroup group = mesh.MaterialGroups[g];
+                    if (group == null || group.TextureNames == null)
+                        continue;
+
+                    for (int t = 0; t < group.TextureNames.Count; t++)
+                    {
+                        string texName = group.TextureNames[t];
+                        if (string.IsNullOrEmpty(texName))
+                            continue;
+
+                        string cleanName = Path.GetFileNameWithoutExtension(texName);
+                        if (checkedTextures.ContainsKey(cleanName))
+                            continue;
+
+                        string tgaPath = FindExternalFileInsensitive(m_tgaFolderPath, cleanName, ".tga");
+                        bool exists = !string.IsNullOrEmpty(tgaPath);
+                        checkedTextures.Add(cleanName, exists);
+
+                        if (exists)
+                        {
+                            found++;
+                            if (logFound)
+                                Debug.Log("Texture OK: " + cleanName + " -> " + tgaPath);
+                        }
+                        else
+                        {
+                            missing++;
+                            Debug.LogWarning("Texture missing for OBM " + Path.GetFileName(obmPath) + ": " + cleanName + ".tga");
+                        }
+                    }
+                }
+            }
+
+            Debug.Log("Texture check " + Path.GetFileName(obmPath) + ": found " + found + ", missing " + missing + ".");
+
+            if (m_importShinyMaterials)
+            {
+                int shinyMissing = CheckTextureFilesForOBMInFolder(obmPath, m_shinyTgaFolderPath, logFound, "Shiny");
+                missing += shinyMissing;
+            }
+
+            return missing;
+        }
+
+        private int CheckTextureFilesForOBMInFolder(string obmPath, string folderPath, bool logFound, string label)
+        {
+            PS3DS_OBMData data = ParseOBM(obmPath);
+            if (data == null || data.Meshes == null)
+                return 0;
+
+            int missing = 0;
+            int found = 0;
+            Dictionary<string, bool> checkedTextures = new Dictionary<string, bool>();
+
+            for (int m = 0; m < data.Meshes.Count; m++)
+            {
+                PS3DS_OBMMesh mesh = data.Meshes[m];
+                for (int g = 0; g < mesh.MaterialGroups.Count; g++)
+                {
+                    PS3DS_OBMMaterialGroup group = mesh.MaterialGroups[g];
+                    if (group == null || group.TextureNames == null)
+                        continue;
+
+                    for (int t = 0; t < group.TextureNames.Count; t++)
+                    {
+                        string texName = group.TextureNames[t];
+                        if (string.IsNullOrEmpty(texName))
+                            continue;
+
+                        string cleanName = Path.GetFileNameWithoutExtension(texName);
+                        if (checkedTextures.ContainsKey(cleanName))
+                            continue;
+
+                        string tgaPath = FindExternalFileInsensitive(folderPath, cleanName, ".tga");
+                        bool exists = !string.IsNullOrEmpty(tgaPath);
+                        checkedTextures.Add(cleanName, exists);
+
+                        if (exists)
+                        {
+                            found++;
+                            if (logFound)
+                                Debug.Log(label + " texture OK: " + cleanName + " -> " + tgaPath);
+                        }
+                        else
+                        {
+                            missing++;
+                            Debug.LogWarning(label + " texture missing for OBM " + Path.GetFileName(obmPath) + ": " + cleanName + ".tga");
+                        }
+                    }
+                }
+            }
+
+            Debug.Log(label + " texture check " + Path.GetFileName(obmPath) + ": found " + found + ", missing " + missing + ".");
+            return missing;
+        }
+
+        private void ValidateSelectedImport()
+        {
+            GameObject root = Selection.activeGameObject;
+            if (root == null)
+            {
+                Debug.LogError("Select an imported root GameObject first.");
+                return;
+            }
+
+            SkinnedMeshRenderer[] renderers = root.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            int rendererCount = renderers != null ? renderers.Length : 0;
+            int totalVertices = 0;
+            int nonRootWeighted = 0;
+            int rootOnly = 0;
+            int missingBones = 0;
+
+            for (int r = 0; r < rendererCount; r++)
+            {
+                SkinnedMeshRenderer smr = renderers[r];
+                if (smr == null || smr.sharedMesh == null)
+                    continue;
+
+                UnityEngine.Mesh mesh = smr.sharedMesh;
+                BoneWeight[] weights = mesh.boneWeights;
+                totalVertices += mesh.vertexCount;
+
+                if (smr.bones == null || smr.bones.Length == 0)
+                    missingBones++;
+
+                for (int i = 0; i < weights.Length; i++)
+                {
+                    BoneWeight bw = weights[i];
+                    bool hasNonRoot = (bw.boneIndex0 != 0 && bw.weight0 > 0.0001f) ||
+                                      (bw.boneIndex1 != 0 && bw.weight1 > 0.0001f) ||
+                                      (bw.boneIndex2 != 0 && bw.weight2 > 0.0001f) ||
+                                      (bw.boneIndex3 != 0 && bw.weight3 > 0.0001f);
+
+                    if (hasNonRoot)
+                        nonRootWeighted++;
+                    else
+                        rootOnly++;
+                }
+            }
+
+            UnityEngine.Animator animator = root.GetComponent<UnityEngine.Animator>();
+            int clips = 0;
+            if (animator != null && animator.runtimeAnimatorController != null)
+                clips = animator.runtimeAnimatorController.animationClips != null ? animator.runtimeAnimatorController.animationClips.Length : 0;
+
+            Debug.Log("Validate Import: renderers=" + rendererCount +
+                      ", vertices=" + totalVertices +
+                      ", nonRootWeighted=" + nonRootWeighted +
+                      ", rootOnly=" + rootOnly +
+                      ", missingBoneArrays=" + missingBones +
+                      ", animator=" + (animator != null) +
+                      ", clips=" + clips + ".");
+
+            if (nonRootWeighted == 0 && totalVertices > 0)
+                Debug.LogWarning("Validate Import: all vertices appear to be attached only to bone 0.");
+        }
+
+        private static string GetPanelDirectory(string previousPath)
+        {
+            if (string.IsNullOrEmpty(previousPath))
+                return "";
+
+            previousPath = previousPath.Replace("\\", "/");
+            if (Directory.Exists(previousPath))
+                return previousPath;
+
+            string dir = Path.GetDirectoryName(previousPath);
+            if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                return dir.Replace("\\", "/");
+
+            return "";
+        }
+        private string AssetPathToFullPath(string assetPath)
+        {
+            if (string.IsNullOrEmpty(assetPath))
+                return Application.dataPath;
+
+            if (Path.IsPathRooted(assetPath))
+                return assetPath;
+
+            return Path.GetFullPath(
+                Application.dataPath + "/../" + assetPath);
+        }
+        private static string GetOutputPanelDirectory(string previousAssetPath)
+        {
+            if (string.IsNullOrEmpty(previousAssetPath))
+                return Application.dataPath;
+
+            previousAssetPath = previousAssetPath.Replace("\\", "/");
+
+            if (previousAssetPath == "Assets")
+                return Application.dataPath;
+
+            if (previousAssetPath.StartsWith("Assets/"))
+            {
+                string fullPath;
+
+                if (Path.IsPathRooted(previousAssetPath))
+                {
+                    fullPath = previousAssetPath;
+                }
+                else
+                {
+                    fullPath = Path.GetFullPath(Application.dataPath + "/../" + previousAssetPath);
+                }
+                fullPath = fullPath.Replace("\\", "/");
+
+                if (Directory.Exists(fullPath))
+                    return fullPath;
+
+                string dir = Path.GetDirectoryName(fullPath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                    return dir.Replace("\\", "/");
+            }
+
+            string fallback = GetPanelDirectory(previousAssetPath);
+            if (!string.IsNullOrEmpty(fallback))
+                return fallback;
+
+            return Application.dataPath;
+        }
+
+        private static string AbsolutePathToAssetPath(string absolutePath)
+        {
+            if (string.IsNullOrEmpty(absolutePath))
+                return null;
+
+            absolutePath = Path.GetFullPath(absolutePath).Replace("\\", "/");
+            string dataPath = Path.GetFullPath(Application.dataPath).Replace("\\", "/");
+
+            if (absolutePath == dataPath)
+                return "Assets";
+
+            if (absolutePath.StartsWith(dataPath + "/"))
+                return "Assets" + absolutePath.Substring(dataPath.Length);
+
+            return null;
+        }
+
+        private static string GetUniqueImportFolderPath(string parentFolder, string baseName)
+        {
+            parentFolder = string.IsNullOrEmpty(parentFolder) ? "Assets" : parentFolder.Replace("\\", "/");
+            baseName = SanitizeFileName(baseName);
+            string candidate = parentFolder + "/" + baseName;
+
+            if (!AssetDatabase.IsValidFolder(candidate) && !Directory.Exists(candidate))
+                return candidate;
+
+            for (int i = 1; i < 10000; i++)
+            {
+                string numbered = parentFolder + "/" + baseName + "_" + i;
+                if (!AssetDatabase.IsValidFolder(numbered) && !Directory.Exists(numbered))
+                    return numbered;
+            }
+
+            return parentFolder + "/" + baseName + "_" + System.DateTime.Now.ToString("yyyyMMddHHmmss");
         }
 
         private static void EnsureFolder(string path)
